@@ -1,5 +1,3 @@
-# TaxAI Case Study Repository
-
 This repository contains the code used in the **TaxAI case study** from the paper:
 
 **Paired Seed Evaluation: Statistical Reliability for Learning-Based Simulators**  
@@ -7,7 +5,7 @@ This repository contains the code used in the **TaxAI case study** from the pape
 
 ---
 
-## Environment and Dependencies
+### Environment and Dependencies
 
 - All required Python packages are listed in `requirements.txt`.
 - The experiments were run using **Python 3.11.14**.
