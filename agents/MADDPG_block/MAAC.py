@@ -14,6 +14,8 @@ from agents.utils import get_action_info
 from datetime import datetime
 from env.evaluation import save_parameters
 
+from omegaconf import OmegaConf
+
 torch.autograd.set_detect_anomaly(True)
 
 def save_args(path, args):
@@ -60,11 +62,12 @@ class maddpg_agent:
                                 "total_consumption", "consumption_10", "consumption_50", "consumption_100", "Bt", "Kt","Gt_prob", "income_tau", "income_xi", "wealth_tau", "wealth_xi"]
         
         self.wandb = False
+        cfg_for_wandb = OmegaConf.to_container(self.args, resolve=True)
         if self.wandb:
             wandb.init(
-                config=self.args,
-                project="TaxAI",
-                entity="taxai",
+                config=cfg_for_wandb,
+                project="",
+                entity="",
                 name=self.model_path.parent.parent.name + "-"+ self.model_path.name +'  n='+ str(self.args.n_households),
                 dir=str(self.model_path),
                 job_type="training",
@@ -206,6 +209,11 @@ class maddpg_agent:
             global_obs, private_obs = self.eval_env.reset()
             global_obs, private_obs = self.observation_wrapper(global_obs, private_obs)
             episode_indicators = []
+            episode_consumption = []
+            episode_mean_work_hours = []
+            episode_participation = []
+            episode_hts = []
+            episode_saving_p = []
 
             while True:
                 with torch.no_grad():
@@ -214,7 +222,6 @@ class maddpg_agent:
                     next_global_obs, next_private_obs = self.observation_wrapper(next_global_obs, next_private_obs)
 
                 steps = 1
-                # 对 10%， 10～50%， 50%～100% 人群分组 找到三组的平均数据
                 total_income = np.mean(self.eval_env.post_income)
                 income_10 = np.mean(self.eval_env.post_income[sort_index[:10]])
                 income_50 = np.mean(self.eval_env.post_income[sort_index[10:50]])
@@ -257,7 +264,7 @@ class maddpg_agent:
                 consumption_50 = np.mean(self.eval_env.consumption[sort_index[10:50]])
                 consumption_100 = np.mean(self.eval_env.consumption[sort_index[50:]])
 
-                Bt = self.eval_env.Bt
+                Bt = (float(getattr(self.eval_env, "Bt_next", self.eval_env.Bt))) *(-1)
                 Kt = self.eval_env.Kt
                 Gt_prob = self.eval_env.Gt_prob
                 income_tau = self.eval_env.government.tau
@@ -265,25 +272,137 @@ class maddpg_agent:
                 wealth_tau = self.eval_env.government.tau_a
                 wealth_xi = self.eval_env.government.xi_a
 
+                _ubi_prop_gdp = float(getattr(self.eval_env, "ubi_prop_gdp", 0.0))
+                episode_consumption.append(np.asarray(self.eval_env.consumption).flatten())
+                episode_saving_p.append(np.asarray(self.eval_env.saving_p).flatten())
+
+                total_gdp = float(getattr(self.eval_env, "GDP", self.eval_env.per_household_gdp))
+                debt_to_gdp = (Bt / max(1e-8, total_gdp)) *(-1)
+
+                ht = self.eval_env.ht.flatten()                      # actual hours (shape (N,))
+                mean_ht = float(np.mean(ht))
+                participation = float(np.mean(ht > (1e-8)))
+
+                episode_mean_work_hours.append(mean_ht)
+                episode_participation.append(participation)
+                episode_hts.append(ht)
+
 
                 # todo add new indicators
                 # datas = [gov_reward, sw, steps, total_income, income_10, income_50, income_100, total_tax, income_tax, income_tax_10, income_tax_50, income_tax_100, total_wealth,
                 #          wealth_10, wealth_50, wealth_100, wealth_tax, wealth_tax_10, wealth_tax_50, wealth_tax_100, per_gdp, income_gini, wealth_gini, wage, total_labor, labor_10,
                 #          labor_50, labor_100, sw_10, sw_50, sw_100, total_consumption, consumption_10, consumption_50, consumption_100, Bt, Kt,Gt_prob, income_tau, income_xi, wealth_tau, wealth_xi]
-                datas = [per_gdp, sw, steps, gov_reward, income_gini, wealth_gini]
+                datas = [per_gdp, sw, steps, gov_reward, income_gini, wealth_gini, float(_ubi_prop_gdp), Bt, debt_to_gdp]
                 episode_indicators.append(datas)
                 if done:
                     break
 
                 global_obs = next_global_obs
                 private_obs = next_private_obs
+            
+            if len(episode_consumption) > 0:
+                cons_mat = np.vstack(episode_consumption)           # shape (T, N)
+                per_house_std = np.std(cons_mat, axis=0)            # absolute volatility per household
+                per_house_mean = np.mean(cons_mat, axis=0)
+                per_house_cv = np.where(per_house_mean > 0, per_house_std / per_house_mean, 0.0)
+
+                # groups use the same sort_index ordering you get from policy
+                top10_idx = sort_index[:10]
+                bot50_idx = sort_index[50:]                          # bottom 50% group in your slicing scheme
+
+                episode_cons_std_overall = float(np.mean(per_house_std))
+                episode_cons_cv_overall  = float(np.mean(per_house_cv))
+
+                episode_cons_std_top10 = float(np.mean(per_house_std[top10_idx]))
+                episode_cons_cv_top10  = float(np.mean(per_house_cv[top10_idx]))
+
+                episode_cons_std_bot50 = float(np.mean(per_house_std[bot50_idx]))
+                episode_cons_cv_bot50  = float(np.mean(per_house_cv[bot50_idx]))
+
+                if cons_mat.shape[0] > 1:
+                    cons_t0 = cons_mat[:-1, :]   # shape (T-1, N)
+                    cons_t1 = cons_mat[1:, :]    # shape (T-1, N)
+
+                    xm = cons_t0 - cons_t0.mean(axis=0)
+                    ym = cons_t1 - cons_t1.mean(axis=0)
+                    num = np.sum(xm * ym, axis=0)
+                    denom = np.sqrt(np.sum(xm * xm, axis=0) * np.sum(ym * ym, axis=0))
+                    per_house_lag1 = np.where(denom > 0, num / denom, 0.0)
+                else:
+                    per_house_lag1 = np.zeros(cons_mat.shape[1], dtype=float)
+
+                episode_lag1_overall = float(np.mean(per_house_lag1))
+                episode_lag1_top10 = float(np.mean(per_house_lag1[top10_idx]))
+                episode_lag1_bot50 = float(np.mean(per_house_lag1[bot50_idx]))
+            else:
+                episode_cons_std_overall = episode_cons_cv_overall = 0.0
+                episode_cons_std_top10 = episode_cons_cv_top10 = 0.0
+                episode_cons_std_bot50 = episode_cons_cv_bot50 = 0.0
+                episode_lag1_overall = episode_lag1_top10 = episode_lag1_bot50 = 0.0
+
+            if len(episode_hts) > 0:
+                ht_mat = np.vstack(episode_hts)             # shape (T, N)
+                per_house_mean_ht = np.mean(ht_mat, axis=0) # mean hours per household across episode
+
+                # group indices by final sort_index (same as consumption grouping)
+                top10_idx = sort_index[:10]
+                bot50_idx = sort_index[50:]
+
+                # episode-level grouped stats
+                episode_work_top10 = float(np.mean(per_house_mean_ht[top10_idx]))
+                episode_work_bot50 = float(np.mean(per_house_mean_ht[bot50_idx]))
+                episode_consistent_mean_work = float(np.mean(per_house_mean_ht))
+            else:
+                episode_work_top10 = episode_work_bot50 = episode_consistent_mean_work = 0.0
+
+            if len(episode_saving_p) > 0:
+                save_mat = np.vstack(episode_saving_p)                # shape (T, N)
+                per_house_mean_save = np.mean(save_mat, axis=0)       # mean saving propensity per household
+
+                # reuse same grouping by policy sort_index
+                top10_idx = sort_index[:10]
+                bot50_idx = sort_index[50:]
+
+                episode_save_overall = float(np.mean(per_house_mean_save))
+                episode_save_top10 = float(np.mean(per_house_mean_save[top10_idx]))
+                episode_save_bot50 = float(np.mean(per_house_mean_save[bot50_idx]))
+            else:
+                episode_save_overall = episode_save_top10 = episode_save_bot50 = 0.0
+
+            # episode-level participation and mean-work (time-averaged vs household-averaged)
+            ep_participation = float(np.mean(episode_participation)) if len(episode_participation) > 0 else 0.0
+            # ep_mean_work could be np.mean(episode_mean_work_hours) but we use household-average for consistency
+            ep_mean_work = episode_consistent_mean_work
+
             years = len(episode_indicators)
             avg_episode_data = np.mean(episode_indicators, axis=0)
-            avg_episode_data[1:4] *= years  # gdp 是每一步的 mean
+            avg_episode_data[1:4] *= years
+
+            work_metrics = np.array([
+                ep_mean_work,
+                ep_participation,
+                episode_work_top10,
+                episode_work_bot50
+            ], dtype=float)
+
+            consumption_metrics = np.array([
+                episode_cons_std_overall, episode_cons_cv_overall,
+                episode_cons_std_top10, episode_cons_cv_top10,
+                episode_cons_std_bot50, episode_cons_cv_bot50,
+                episode_lag1_overall, episode_lag1_top10, episode_lag1_bot50
+            ], dtype=float)
+
+            saving_metrics = np.array([episode_save_overall, episode_save_top10, episode_save_bot50], dtype=float)
+
+            # append the six episode-level consumption metrics to the averaged row
+            avg_episode_data = np.concatenate([avg_episode_data, work_metrics, consumption_metrics, saving_metrics])
+
             economic_indicators.append(avg_episode_data)
 
         avg_indicators = np.mean(economic_indicators, axis=0)
-        log_name = ["per_gdp", "social_welfare", "years", "gov_rew", "income_gini", "wealth_gini"]
+        log_name = ["per_household_gdp", "social_welfare", "years", "gov_rew", "income_gini", "wealth_gini", "ubi_prop_gdp", "nominal_debt", "debt_to_gdp_ratio", "mean_working_hours", "labour_participation_rate", "top10_mean_working_hours", "bottom50_mean_working_hours",
+                     "consumption_standard_deviation_overall", "consumption_coeff_variation_overall", "consumption_standard_deviation_top10", "consumption_coeff_variation_top10", "consumption_standard_deviation_bot50", "consumption_coeff_variation_bot50",
+                     "pearson_corr_consumption_lag1_overall",  "pearson_corr_consumption_lag1_top10", "pearson_corr_consumption_lag1_bot50", "mean_saving_propensity_overall", "mean_saving_propensity_top10", "mean_saving_propensity_bot50"]
 
         return {k: v for k, v in zip(log_name, avg_indicators)}
     

@@ -3,7 +3,8 @@ from utils.episode import EpisodeKey
 import math
 import copy
 import numpy as np
-from gym.spaces import Box
+#from gym.spaces import Box
+from gymnasium.spaces import Box
 
 class Government(BaseEntity):
     name='government'

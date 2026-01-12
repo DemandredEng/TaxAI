@@ -45,8 +45,8 @@ class ppo_agent:
         if self.wandb == True:
             wandb.init(
                 config=self.args,
-                project="TaxAI",  # please update as your project
-                entity="taxai",
+                project="",  # please update as your project
+                entity="",
                 name=self.model_path.parent.parent.name + "-" + self.model_path.name + '  n=' + str(self.args.n_households),
                 dir=str(self.model_path),
                 job_type="training",

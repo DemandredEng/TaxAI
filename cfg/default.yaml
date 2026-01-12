@@ -8,7 +8,7 @@ Environment:
     - entity_name: 'government'
       entity_args:
         n: 1            #number of government
-        action_shape: 5
+        action_shape: 6
 
     - entity_name: 'household'
       entity_args:
@@ -34,6 +34,10 @@ Environment:
       gini_weight: 1
       gov_task: "gdp"  # choices: {"gdp", "gini", "social_welfare", "gdp_gini"}
 
+      max_ubi_fraction_of_gdp: 0.2
+      lambda_k: 0.8
+
+
 
 Trainer:
   n_households: 10
@@ -55,7 +59,7 @@ Trainer:
   gamma: 0.975
   tau:  5e-3
   eval_episodes: 10
-  init_exploration_steps: 1000
+  init_exploration_steps: 10000
   ppo_tau: 0.95
   ppo_gamma: 0.99
   eps: 1e-5

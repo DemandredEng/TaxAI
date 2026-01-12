@@ -4,7 +4,8 @@ from entities.government import Government
 import numpy as np
 import math
 import torch
-from gym.spaces import Box
+#from gym.spaces import Box
+from gymnasium.spaces import Box
 import copy
 import pygame
 import sys
@@ -40,11 +41,19 @@ class economic_society:
         self.consumption_tax_rate = env_args['consumption_tax_rate']
         self.gini_weight = env_args['gini_weight']
         self.gov_task = env_args['gov_task']
+        self.lambda_k = env_args['lambda_k']
         # self.episode_length = self.episode_years/self.year_per_step
         self.episode_length = 300
         self.step_cnt = 0
         self.xi_max = 0.05
         self.tau_max = 0.2
+
+        self.ubi_transfers_next = None
+        self.ubi_to_pay_next = 0.0
+
+        self.max_ubi_fraction_of_gdp = env_args['max_ubi_fraction_of_gdp']
+
+        self.ubi_mode = str(env_args.get('ubi_mode', 'ubi')).strip().lower()
 
         global_obs, private_obs = self.reset()
 
@@ -100,12 +109,36 @@ class economic_society:
         self.Bt = copy.copy(self.Bt_next)
         self.households.at = copy.copy(self.households.at_next)
 
-        self.government.tau, self.government.xi, self.government.tau_a, self.government.xi_a, self.Gt_prob = self.action_wrapper(self.valid_action_dict[self.government.name])
+        ### UBI DISBURSEMENT
+
+        if getattr(self, 'ubi_transfers_next', None) is not None:
+
+            transfers = np.asarray(self.ubi_transfers_next)
+            transfers = transfers.reshape(self.households.at.shape)
+            self.ubi_paid = float(np.sum(transfers))
+            
+            #self.households.at = self.households.at + transfers
+            # reset storage
+            self.ubi_transfers_next = np.zeros_like(self.households.at)
+            self.ubi_to_pay_next = 0.0
+        else:
+            transfers = np.zeros_like(self.households.at, dtype=float)
+
+        #self.government.tau, self.government.xi, self.government.tau_a, self.government.xi_a, self.Gt_prob = self.action_wrapper(self.valid_action_dict[self.government.name])
+        self.government.tau, self.government.xi, self.government.tau_a, self.government.xi_a, self.Gt_prob, self.ubi_prop = self.action_wrapper(self.valid_action_dict[self.government.name])
         self.government.xi *= self.xi_max
         self.government.xi_a *= self.xi_max
         self.government.tau *= self.tau_max
         self.government.tau_a *= self.tau_max
         self.Gt_prob *= 0.3
+        #self.Gt_prob = 0.20
+        if self.ubi_mode == "na":
+            self.ubi_prop_gdp = 0
+        elif self.ubi_mode == "ubi":
+            self.ubi_prop_gdp = self.ubi_prop * self.max_ubi_fraction_of_gdp 
+        else:
+            print("ERROR - UBI MODE INCORRECT")
+
         if np.mean(self.action_wrapper(self.valid_action_dict[self.government.name])) == 0:
             self.consumption_tax_rate = 0
 
@@ -129,20 +162,50 @@ class economic_society:
 
         self.post_income = self.income - self.income_tax
         post_asset = self.households.at - self.asset_tax
-        total_wealth = self.post_income + post_asset
+        total_wealth = self.post_income + post_asset + transfers
 
         # compute tax
         aggregate_consumption = (1 - saving_p) * total_wealth
         choose_consumption = 1/(1 + self.consumption_tax_rate) * aggregate_consumption
 
+        '''
+        Penalised instead - RL training trick
         if np.sum(choose_consumption) + Gt > self.GDP:
             self.done = True
+        '''
+
         self.consumption = choose_consumption
 
         consumption_tax = self.consumption * self.consumption_tax_rate
         self.households.at_next = total_wealth - self.consumption * (1+self.consumption_tax_rate)
         self.tax_array = self.income_tax + self.asset_tax + consumption_tax
-        self.Bt_next = (1 + self.interest_rate) * self.Bt + Gt - np.sum(self.tax_array)
+
+        ubi_budget = self.ubi_prop_gdp * self.GDP
+
+        if np.isnan(ubi_budget) or np.isinf(ubi_budget):
+            self.ubi_transfers_next = np.zeros_like(self.households.at)
+            self.ubi_to_pay_next = 0.0
+        else:
+            n = int(self.households.n_households)
+            per_recipient_amount = float(ubi_budget) / max(1, n)  # avoid div-by-zero
+            self.log_per_recipient_amount = per_recipient_amount
+
+            # create transfers with shape matching households.at (n_households, 1)
+            if n > 0:
+                transfers = np.full(self.households.at.shape, per_recipient_amount, dtype=float)
+            else:
+                transfers = np.zeros_like(self.households.at, dtype=float)
+
+            self.ubi_transfers_next = transfers
+            self.ubi_to_pay_next = float(per_recipient_amount * n)
+
+            # safety: ensure ubi_to_pay_next is finite and non-negative
+            if not np.isfinite(self.ubi_to_pay_next) or self.ubi_to_pay_next < 0:
+                self.ubi_to_pay_next = 0.0
+                self.ubi_transfers_next = np.zeros_like(self.households.at, dtype=float)
+                self.log_per_recipient_amount = 0.0
+
+        self.Bt_next = (1 + self.interest_rate) * self.Bt + Gt - np.sum(self.tax_array) + float(self.ubi_paid)
         #self.Kt_next = np.sum(self.households.at_next) - self.Bt_next
         self.Kt_next = np.sum(self.households.at_next) - self.Bt_next + (self.alpha * (self.Kt/self.Lt)**(self.alpha-1)+1-self.depreciation_rate ) *self.Kt + (1+self.interest_rate) *(self.Bt - np.sum(self.households.at))
 
@@ -155,6 +218,14 @@ class economic_society:
         # reward
         self.households_reward = self.utility_function(self.consumption, self.ht)
         self.government_reward = self.gov_reward()
+
+        ### PENALTY INSTEAD OF TERMINATION
+        self.gov_reward_scale = 0.99 * self.gov_reward_scale + 0.01 * abs(self.government_reward)
+        phi = max(0.0, (np.sum(choose_consumption) + Gt - self.GDP) / self.GDP)
+        excess_penalty = self.lambda_k * self.gov_reward_scale * np.tanh(phi)
+        self.government_reward -= excess_penalty
+        self.excess_penalty_applied = (excess_penalty > 0)
+
         # terminal conditions: if gini>0.9; someone goes bankrupt; production capital < 0
         self.done = self.done or bool(self.wealth_gini > 0.9 or self.income_gini>0.9 or math.isnan(self.government_reward *self.wealth_gini * self.income_gini) or
                                       math.isnan(np.mean(self.households_reward)) or np.min(self.households.at_next) < 0 or self.Kt_next < 0)
@@ -216,6 +287,10 @@ class economic_society:
         self.ht = self.workinghours_wrapper(self.workingHours)
         self.GDP = self.generate_gdp()
         self.income = self.households.e * self.ht
+
+        self.ubi_transfers_next = np.zeros((self.households.n_households, 1))
+        self.ubi_to_pay_next = 0.0
+        self.gov_reward_scale = 1.0
 
         self.display_mode = False
         return self.get_obs()

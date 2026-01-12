@@ -7,7 +7,8 @@ import random
 import quantecon as qe
 import matplotlib.pyplot as plt
 
-from gym.spaces import Box
+#from gym.spaces import Box
+from gymnasium.spaces import Box
 
 class Household(BaseEntity):
     name='Household'
@@ -63,7 +64,7 @@ class Household(BaseEntity):
                 else:
                     # remain in normal
                     self.e_array[i, 1] = 0
-                    self.e_array[i, 0] = np.exp(self.rho_e * np.log(self.e_past[i, 0]) + self.sigma_e * np.random.randn())
+                    self.e_array[i, 0] = np.exp(self.rho_e * np.log(max(self.e_past[i, 0], 1e-8)) + self.sigma_e * np.random.randn())
             else:
                 # super state
                 if np.random.rand() < self.e_q:

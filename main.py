@@ -16,7 +16,7 @@ def parse_args():
     parser.add_argument("--config", type=str, default='default')
     parser.add_argument("--alg", type=str, default='rule_based', help="ppo, rule_based, independent")
     parser.add_argument("--task", type=str, default='gdp', help="gini, social_welfare, gdp_gini")
-    parser.add_argument('--device-num', type=int, default=1, help='the number of cuda service num')
+    parser.add_argument('--device-num', type=int, default=0, help='the number of cuda service num')
     parser.add_argument('--n_households', type=int, default=100, help='the number of total households')
     parser.add_argument('--seed', type=int, default=1, help='the random seed')
     parser.add_argument('--hidden_size', type=int, default=128, help='[64, 128, 256]')
@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument('--update_cycles', type=int, default=100, help='[10，100，1000]')
     parser.add_argument('--update_freq', type=int, default=10, help='[10，20，30]')
     parser.add_argument('--initial_train', type=int, default=10, help='[10，100，200]')
+    parser.add_argument('--ubi_mode', type=str, default= 'ubi') ## ubi or na
 
 
     args = parser.parse_args()
@@ -43,6 +44,7 @@ if __name__ == '__main__':
     yaml_cfg.Environment.Entities[1]["entity_args"].n = args.n_households
     yaml_cfg.Environment.env_core["env_args"].gov_task = args.task
     yaml_cfg.seed = args.seed
+    yaml_cfg.Environment.env_core["env_args"].ubi_mode = args.ubi_mode
     
     '''tuning'''
     # tuning(yaml_cfg)
